@@ -104,7 +104,8 @@ export function sentencesOf(t: string): { text: string; at: number }[] {
 }
 
 export function classify(body: string): Classified {
-  const t = body.trim();
+  // The RX patterns spell an apostrophe as "'": a phone's curly one ("can’t", "what’s") must match too.
+  const t = body.trim().replace(/[‘’ʼ`´]/g, "'");
   const low = normText(t);
   const abuse: Abuse[] = [];
   const disclosed: Abuse[] = [];
@@ -193,8 +194,13 @@ const SCHOOL_YEAR: Record<string, number> = { freshman: 14, sophomore: 15, junio
 /**
  * Words just before "I'm 12" that make it not a statement of the sender's age today: "I act like
  * I'm 12", "when I was 12", "if I'm 12", "she said I'm 12" (network-service-1).
+ * A quote is not one of these words. An age inside a quote that is still open is dropped in
+ * `agesStated`. A quote that has already closed does not drop the next statement
+ * (`he said "hi" I'm 15`, `"Hey" I'm 15`).
  */
-const NOT_NOW = /(?:\blike|\bas if|\bas though|\bpretend(?:ing)?(?: that)?|\bwhen|\bif|\bimagine|\bsays?|\bsaid|\bfeel(?:s|ing)? like|\bacts?|\bacting|\bthink|\bthinks|\bthought|"|')\s*$/;
+const NOT_NOW = /(?:\blike|\bas if|\bas though|\bpretend(?:ing)?(?: that)?|\bwhen|\bif|\bimagine|\bsays?|\bsaid|\bfeel(?:s|ing)? like|\bacts?|\bacting|\bthink|\bthinks|\bthought)\s*$/;
+/** A clause break. The words before it do not apply to an age after it. */
+const CLAUSE_BREAK = /[.,;!?\n]|\b(?:but|though|however|although)\b/g;
 type AgeRule = { rx: RegExp; age: (m: RegExpExecArray) => number; explicit?: boolean };
 const AGE_RX: AgeRule[] = [
   // Explicit: "I am 12 years old", "im 15 y/o", "my age is 12", "15 y/o here", "age: 15".
@@ -237,22 +243,81 @@ const AGE_RX: AgeRule[] = [
   { rx: new RegExp(`\\b${ME}\\s+a\\s+(?:high schooler|hs student|high school student)\\b`), age: () => 15 },
 ];
 
+/** Every match of one rule. A rule can match more than once in one message. */
+function allMatches(rx: RegExp, text: string): RegExpExecArray[] {
+  const re = new RegExp(rx.source, rx.flags.includes("g") ? rx.flags : `${rx.flags}g`);
+  const out: RegExpExecArray[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    out.push(m);
+    if (m[0].length === 0) re.lastIndex++;
+  }
+  return out;
+}
+
+/**
+ * True when `prefix` (the text before an age) leaves a quotation open, so the age is inside it
+ * (`she said "I'm 15"`, `"I'm 15"`). Apostrophes in "I'm" and "don't", and a foot mark (`5'6`, `5'`),
+ * are not quotes. A quote that has closed is not open: `he said "hi" I'm 15` is a real age.
+ */
+function quoteStillOpen(prefix: string): boolean {
+  let double = false, single = false;
+  for (let i = 0; i < prefix.length; i++) {
+    const c = prefix[i]!;
+    const prev = i > 0 ? prefix[i - 1]! : "";
+    const next = i + 1 < prefix.length ? prefix[i + 1]! : "";
+    if (c === "\"") {
+      // 6" is inches, unless this mark closes a quote that is already open.
+      if (!double && /[0-9]/.test(prev)) continue;
+      double = !double;
+      continue;
+    }
+    if (c !== "'") continue;
+    if (/[a-z0-9]/.test(prev) && /[a-z0-9]/.test(next)) continue;
+    if (!single && (/[0-9]/.test(prev) || /[a-z]/.test(prev))) continue;
+    single = !single;
+  }
+  return double || single;
+}
+
+/**
+ * The age is not the sender's age today when a not-now word sits immediately before it in the same
+ * clause, or when the age is still inside a quote. Quote state is read from the whole message, so
+ * a period inside quotes (`"Hey." I'm 15.`) does not turn the closing quote into a new opener.
+ * The word lookbehind stops at the previous clause, so that closer cannot cancel the next statement.
+ */
+function notNowBefore(text: string, at: number): boolean {
+  const before = text.slice(0, at);
+  if (quoteStillOpen(before)) return true;
+  let from = 0;
+  CLAUSE_BREAK.lastIndex = 0;
+  for (const m of before.matchAll(CLAUSE_BREAK)) from = m.index! + m[0].length;
+  return NOT_NOW.test(before.slice(from).slice(-24));
+}
+
 /**
  * The youngest age the sender states about themselves, and the youngest they state in the explicit
- * form ("I am 12 years old"). First person and present tense only, so "my son is 12", "I teach
- * middle school" or "I act like I'm 12" never change the member's age.
+ * form ("I am 12 years old"). Every occurrence counts, in every sentence: "I'm 30. I'm 15." is 15,
+ * "I'm 30. Age: 15." is 15, and "I am 40 years old. I am 12 years old." is 12. First person and
+ * present tense only, so "my son is 12", "I teach middle school" or "I act like I'm 12" never
+ * change the member's age. An age inside a quote that is still open is not theirs; a quote that
+ * has closed does not hide the next statement (`he said "hi" I'm 15`).
  */
 export function agesStated(body: string): { age?: number; explicit?: number } {
   const t = normText(body);
   const out: { age?: number; explicit?: number } = {};
-  for (const { rx, age, explicit } of AGE_RX) {
-    const m = rx.exec(t);
-    if (!m) continue;
-    if (NOT_NOW.test(t.slice(Math.max(0, m.index - 24), m.index))) continue;
-    const a = age(m);
-    if (!Number.isFinite(a)) continue;
-    if (out.age === undefined || a < out.age) out.age = a;
-    if (explicit && (out.explicit === undefined || a < out.explicit)) out.explicit = a;
+  // Rules that start at the beginning of the text ("age: 15", "15 y/o here", "15f", "f15", "15 here")
+  // are read on each sentence. On the whole message they would see only the first sentence.
+  for (const s of sentencesOf(t)) {
+    for (const { rx, age, explicit } of AGE_RX) {
+      for (const m of allMatches(rx, s.text)) {
+        if (notNowBefore(t, s.at + m.index)) continue;
+        const a = age(m);
+        if (!Number.isFinite(a)) continue;
+        if (out.age === undefined || a < out.age) out.age = a;
+        if (explicit && (out.explicit === undefined || a < out.explicit)) out.explicit = a;
+      }
+    }
   }
   return out;
 }
@@ -268,15 +333,15 @@ const OTHER_AGE_RX: AgeRule[] = [
   { rx: /\b(?:he|she|they) (?:said|told me|says|mentioned) (?:he|she|they)(?:'s|'re| is| are| was| were) (?:only |just )?(\d{1,2})\b/, age: m => Number(m[1]) },
 ];
 
-/** An age the sender states about someone else ("he's only 15", "she's in high school"); under 18 only. */
+/** The youngest age the sender states about someone else ("he's 20. She's 14." is 14). Under 18 only. */
 export function otherAgeStated(body: string): number | undefined {
   const t = normText(body);
   let best: number | undefined;
   for (const { rx, age } of OTHER_AGE_RX) {
-    const m = rx.exec(t);
-    if (!m) continue;
-    const a = age(m);
-    if (Number.isFinite(a) && a < 18 && a > 0 && (best === undefined || a < best)) best = a;
+    for (const m of allMatches(rx, t)) {
+      const a = age(m);
+      if (Number.isFinite(a) && a < 18 && a > 0 && (best === undefined || a < best)) best = a;
+    }
   }
   return best;
 }
@@ -389,8 +454,8 @@ const AREA_ALIASES: [RegExp, string][] = [
 const AREA_NAMES = new Set(NEIGHBORHOODS.map(n => n.name));
 /** Words that say where the sender is based ("I live in", "based in", "I'm around"). */
 const HOME_CTX = /\b(i live|i'?m living|living in|live in|based (in|out of)|i'?m (in|around|near|over in|up in|out in|down in|by)|im (in|around|near)|i'?m from|my (place|apartment|apt|neighborhood|hood) is|home is|i stay in|my area is|i'?m mostly (in|around)|around .* most of the week)\b/;
-/** Where a neighborhood is not home: "used to live in", "work in", "moved from". */
-const NOT_HOME = /\b(used to live(?: in)?(?: the)?|moved (?:away )?from(?: the)?|grew up in(?: the)?|work(ing)? in|office (is )?in|commute to|visiting|not in|never been to|far from)\s*$/;
+/** Where a neighborhood is not home: "used to live in", "work in the", "moved from". Each can take "the". */
+const NOT_HOME = /\b(used to live(?: in)?|moved (?:away )?from|grew up in|work(ing)? in|office (is )?in|commute to|visiting|not in|never been to|far from)(?: the)?\s*$/;
 
 export interface Profile {
   interests: string[]; skills: string[]; desireIds: string[];
@@ -768,16 +833,21 @@ export function availabilityTags(body: string): string[] {
   return [...out.keys()].sort().flatMap(d => ORDER.filter(p => out.get(d)!.has(p)).map(p => `${p}:${DAYS3[d]}`));
 }
 
+/** Idioms with a no-word that do not say no: "yes, no doubt", "no complaints", "wouldn't miss it". */
+const AGAIN_YES_IDIOM = /\b(no (?:doubt|question|hesitation|complaints?|regrets?|notes)|(?:wouldn'?t|won'?t|would not|will not) (?:miss|change|hesitate|say no)|(?:don'?t|do not) (?:want|wanna) to miss|not gonna lie|not to lie)\b/g;
+
 /**
  * The answer to "Would you do it again with this group?" after a plan (plans ask 8): yes, no, or
  * unclear. Facts about attendance come first ("couldn't make it", "nobody else came"): those are
- * not an answer about the group.
+ * not an answer about the group. A no-word inside a yes idiom is removed first; a negation before
+ * "again" ("I would not do it again") is a no.
  */
 export function planAgainOf(body: string): "yes" | "no" | "unclear" {
   const t = body.toLowerCase().replace(/[‘’ʼ]/g, "'");
   if (/\b(couldn'?t make it|didn'?t (go|make it)|nobody else|no one else|never showed|didn'?t show)\b/.test(t)) return "unclear";
-  if (/\b(probably not|not really|no\b|nah|nope|wouldn'?t|won'?t|not again|never again)\b/.test(t)) return "no";
-  if (/\b(yes|yeah|yep|definitely|absolutely|for sure|again|count me in)\b/.test(t)) return "yes";
+  const s = t.replace(AGAIN_YES_IDIOM, " ");
+  if (/\b(probably not|not really|no\b|nah|nope|wouldn'?t|won'?t|would not|will not|not again|never again|don'?t think|(?:don'?t|do not) (?:really )?(?:want|wanna)|(?:never|not) (?:\w+ ){0,4}again|once was enough|i'?ll pass|not for me|rather not|not with (?:this|that|the|these|those|them)|(?:wasn'?t|not) (?:really )?my (?:thing|crowd|scene|vibe))\b/.test(s)) return "no";
+  if (/\b(yes|yeah|yep|definitely|absolutely|for sure|again|count me in|(?:wouldn'?t|would not) say no)\b/.test(t)) return "yes";
   return "unclear";
 }
 

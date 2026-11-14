@@ -2,8 +2,9 @@
 // two-hop), member-level hard filters first, and an exposure floor that reserves slots for
 // low-exposure / low-data members so they are not starved by stronger profiles.
 import type { Category, Facet, Intent, MemberId } from "@thenetwork/core";
+import { initial, step } from "../../core/src/generated/exposureFloor.ts";
 import { cosine, tokenize } from "./embed.ts";
-import { intentSatisfaction } from "./complementarity.ts";
+import { intentSatisfaction, SAT } from "./complementarity.ts";
 import { memberReason, type FilterReason } from "./filters.ts";
 import type { Format, Role } from "./types.ts";
 import { intentText, type World } from "./world.ts";
@@ -53,6 +54,13 @@ export function twoHop(w: World, a: MemberId): Map<MemberId, { via: MemberId; st
   return out;
 }
 
+function startExposureFloor(limit: number, available: number) {
+  // spec/exposureFloor.md, "Retrieval starts with a fixed allocation of slots"
+  const rounded = Math.ceil(limit);
+  const slotLimit = Number.isNaN(rounded) ? available : Math.max(0, Math.min(rounded, available));
+  return step(initial, { type: "allocate", slotLimit });
+}
+
 /**
  * Retrieve members for an intent: semantic top-K + tag channel + graph channel, union, dedupe,
  * then append up to exposureFloorK low-exposure members above minSim that fell outside top-K.
@@ -62,8 +70,8 @@ export function retrieveForIntent(ctx: RetrievalCtx, intent: Intent, pool: Membe
   const cfg = w.cfg.retrieval;
   const toks = new Set(tokenize(intentText(intent)));
   const hop = twoHop(w, intent.memberId);
-  // Structured "need" channel (complementarity.ts): members whose skills / offers / pool meet the
-  // intent are kept even below minSim, and structured satisfaction joins the ordering.
+  // Structured "need" channel (complementarity.ts): a skill, an offer, a shared pool, or a
+  // mutual romance preference can meet the intent below minSim. Satisfaction also joins the rank.
   const cc = w.cfg.complementarity;
   const structured = cc.weight > 0;
   const scored: Retrieved[] = [];
@@ -75,6 +83,12 @@ export function retrieveForIntent(ctx: RetrievalCtx, intent: Intent, pool: Membe
     if (tagHit) channels.add("tag");
     if (hop.has(id) && sim >= cfg.warmMinSim) channels.add("graph");
     const need = structured ? intentSatisfaction(w, intent, id) : 0;
+    // SAT.pool (0.85) is the lowest level that opens this channel.
+    // A skill or an offer is SAT.need (1). A mutual romance preference is SAT.romance (0.9).
+    // Romance is above the pool bar, so this one test admits it. A test against SAT.romance
+    // alone would drop a shared pool. Interest overlap is SAT.interest (0.45), so it stays
+    // on the semantic and tag channels and cannot bypass minSim.
+    if (need >= SAT.pool) channels.add("need");
     if (sim < minSim && !channels.has("graph") && !channels.has("need")) continue;
     scored.push({ id, sim, facet, channels, floor: false, rank: sim + cc.weight * need });
   }
@@ -83,15 +97,19 @@ export function retrieveForIntent(ctx: RetrievalCtx, intent: Intent, pool: Membe
   const out = new Map<MemberId, Retrieved>();
   scored.slice(0, cfg.topK).forEach(r => { if (r.sim >= minSim) r.channels.add("semantic"); out.set(r.id, r); });
   for (const r of scored) if (r.channels.has("tag") || r.channels.has("graph") || r.channels.has("need")) if (!out.has(r.id)) out.set(r.id, r);
-  // Exposure floor.
-  let floor = 0;
+  let floor = startExposureFloor(cfg.exposureFloorK, scored.length);
   for (const r of scored) {
-    if (floor >= cfg.exposureFloorK) break;
-    if (out.has(r.id)) continue;
-    const mi = w.get(r.id)!;
-    if ((mi.lowExposure || mi.lowData || mi.newcomer) && r.sim >= minSim) {
-      r.channels.add("exposure_floor"); r.floor = true; out.set(r.id, r); floor++;
-    }
+    if (floor.phase === "Full") break;
+    const alreadyIncluded = out.has(r.id);
+    const mi = alreadyIncluded ? undefined : w.get(r.id)!;
+    // spec/exposureFloor.md, "A slot goes to an eligible candidate outside the prior results"
+    const next = step(floor, { type: "reserveSlot", alreadyIncluded,
+      priority: Boolean(mi && (mi.lowExposure || mi.lowData || mi.newcomer)), similarityEligible: r.sim >= minSim });
+    if (next === floor) continue;
+    floor = next;
+    r.channels.add("exposure_floor");
+    r.floor = true;
+    out.set(r.id, r);
   }
   return [...out.values()].sort(byRank);
 }
@@ -110,11 +128,19 @@ export function retrieveByEmbedding(ctx: RetrievalCtx, q: number[], pool: Member
   }
   out.sort((a, b) => (b.sim - a.sim) || (a.id < b.id ? -1 : 1));
   const top = out.slice(0, w.cfg.retrieval.topK);
-  let floor = 0;
-  for (const r of out.slice(w.cfg.retrieval.topK)) {
-    if (floor >= w.cfg.retrieval.exposureFloorK) break;
+  const remaining = out.slice(w.cfg.retrieval.topK);
+  let floor = startExposureFloor(w.cfg.retrieval.exposureFloorK, remaining.length);
+  for (const r of remaining) {
+    if (floor.phase === "Full") break;
     const mi = w.get(r.id)!;
-    if (mi.lowExposure || mi.lowData || mi.newcomer) { r.channels.add("exposure_floor"); r.floor = true; top.push(r); floor++; }
+    // Slicing and the score filter above already separate these rows from the semantic results.
+    const next = step(floor, { type: "reserveSlot", alreadyIncluded: false,
+      priority: Boolean(mi.lowExposure || mi.lowData || mi.newcomer), similarityEligible: true });
+    if (next === floor) continue;
+    floor = next;
+    r.channels.add("exposure_floor");
+    r.floor = true;
+    top.push(r);
   }
   return top;
 }
