@@ -26,6 +26,7 @@ import { buildSite, DRAFT_MARKERS, SITES } from "../../sites/sites.ts";
 import { DEFAULT_BACKEND_ORIGIN } from "../../sites/skills.config.ts";
 import { DATA_DIR } from "../synthetic/common.ts";
 import { Block, expect } from "./gate.ts";
+import { declinedPairReprobes } from "./repeat-probes.ts";
 
 type Msg = Extract<RunRecord, { type: "message" }>;
 type Log = Extract<RunRecord, { type: "network_log" }>;
@@ -106,19 +107,11 @@ async function networkGates(b: Block) {
   await w.complete();
 
   await b.run("network-consent-5: after a probe \"no\", the pair is not probed again (no later opportunity holds the member and the person they declined)", () => {
-    const parts = new Map<string, MemberId[]>();
-    for (const l of logs(R, "probe_started")) parts.set(String((l.detail.proposal as { id: string }).id), (l.detail.proposal as { participants: MemberId[] }).participants);
-    const noes = logs(R, "probe_answer").filter(l => l.detail.yes === false && !l.detail.expired && !l.detail.plan);
-    expect(noes.length).toBeGreaterThan(5);
-    const again: string[] = [];
-    for (const n of noes) {
-      const m = String(n.detail.memberId), others = (parts.get(String(n.detail.oppId)) ?? []).filter(x => x !== m);
-      for (const l of logs(R, "probe_started").filter(l => l.t > n.t && !l.detail.plan)) {
-        const p = (l.detail.proposal as { id: string; participants: MemberId[] });
-        if (p.participants.includes(m) && others.some(o => p.participants.includes(o))) again.push(`${n.detail.oppId} -> ${p.id}`);
-      }
-    }
-    expect(again).toEqual([]);
+    // The pair is who was in the opportunity when the member said no. A person who had
+    // already been replaced is not that pair (markDeclined uses the roster at the answer).
+    const found = declinedPairReprobes(R);
+    expect(found.declines).toBeGreaterThan(5);
+    expect(found.again).toEqual([]);
   });
 
   await b.run("network-consent-11: an interest named to a member in a probe or a reveal is one another participant marked shareable", () => {
