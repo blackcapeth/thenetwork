@@ -16,7 +16,8 @@ This repository is a Slop bounty repository with a monthly pool of 1,000 USDC. [
 
 1. Star this repository with your own GitHub account.
 2. Fork this repository to your own GitHub account.
-3. Do all work on a branch in your fork. Open your PR from the fork into `main`.
+3. Do all work on a branch in your fork. Open your PR from the fork into `vibestack`.
+   For a maintainer-requested backport, follow the guide on the target branch.
 
 You can use the GitHub web page, browser automation, computer use or the GitHub CLI:
 
@@ -25,23 +26,28 @@ gh api -X PUT user/starred/eliza-research/thenetwork
 gh repo fork eliza-research/thenetwork --clone
 ```
 
-## 2. Scope: the PRD and the MVP plan are binding
+## 2. Scope and specification
 
-Two documents define the minimum viable product (MVP). Work only inside them.
+The [product specification](spec/product/README.md) combines the PRD, MVP
+plan, user stories, and founder decisions. It defines what ships and what
+needs approval. Link the specific story or rule when you propose a change.
 
-| Document | Where |
-|---|---|
-| PRD (product requirements document), canonical | [Google Doc](https://docs.google.com/document/d/1lLQAZNAMSC_yHCkUBVbp1CCwvyR17PuvV7TnpfuY8Xc/edit). Section 28 is the MVP. Section 29 lists the MVP flows. Section 37 is the build plan. Section 40 is the four-app platform. |
-| PRD local copy | [docs/prd-snapshot.md](docs/prd-snapshot.md). If it disagrees with the Google Doc, the Google Doc is correct. |
-| PRD edits not yet applied | [docs/prd-pending-edits.md](docs/prd-pending-edits.md) |
-| MVP plan | [docs/mvp-plan.md](docs/mvp-plan.md), with the status detail in [docs/mvp-gaps.md](docs/mvp-gaps.md) |
-| Founder decisions after the snapshot | [AGENTS.md](AGENTS.md), "Platform decisions" and "Founder decisions" |
-
-Rules:
-
-- If a capability is not in PRD Section 28.3 or Section 40, it is not in the MVP. PRD Section 28.4 lists capabilities that are not in the MVP. Do not build them.
-- If the documents do not clearly cover your change, ask a maintainer in the issue. Start work only after a maintainer confirms the scope in writing.
-- **New features need human approval first.** Maintainers discuss a new feature with the founders. If they agree, they add it to the PRD and the MVP plan. Only then can a contributor build it. An issue or a PR cannot add a feature by itself.
+- Work within the launch scope. Capabilities marked deferred need written
+  maintainer approval and an update to the product specification.
+- Add or update the story and its rules in `spec/<name>.md`. Put the Quint
+  for a rule immediately below its prose. Follow the
+  [sync skill](.claude/skills/sync/SKILL.md).
+- Use the generated TypeScript for the decision in the owning package.
+  Run `bun run spec:sync` to publish the generated modules. Commit the
+  source spec and the published modules together.
+- Keep the relevant [whole-flow model](spec/models/README.md) consistent
+  with the runtime. Compare the guards, outcomes, and invariants where
+  the generated rule enters the flow.
+- Run `bun run check` for the Vibespec pipeline and the project commands in
+  section 6 for the application. The product owner runs `bun run accept`
+  after comparing the prose and Quint.
+- For work on the generator, run `bun run spec:selftest` and add a fixture
+  for each new class of error it detects.
 
 ## 3. What is accepted and what is not
 
@@ -55,18 +61,20 @@ Rules:
 | **Validation of simulations and core algorithms** | Proof that a simulation, a gate, the oracle (the simulator's hidden answer key) or a judge measures the wrong thing, and the fix. |
 | **Security** | A reproduced weakness and its fix, with a security-suite case that fails before the fix. |
 | **Tests that prove real behavior** | A sim gate, a scenario, a corpus row in `evals/`, or an integration or e2e case that fails before the fix and passes after it. |
-| **A missing MVP capability** | The PRD or MVP plan requires it, and the code does not have it. Give the section number. |
+| **A missing MVP capability** | Link the in-scope product story and the rule the code must implement. |
 
 ### 3.2 Not accepted
 
-Maintainers close these. They can penalize the contributor under the project contribution policy.
+Maintainers close these. The [evidence policy](#evidence) explains when
+Slop.cash deducts Points.
 
 - UI, visual, style or copy changes (section 9).
 - Refactors for preference, renames, file moves and comment edits with no bug and no measured result.
-- Speculative features, and new features without approved PRD and MVP-plan updates.
+- Speculative features, and new features without approved updates to the product specification.
 - Busywork tests: unit tests, smoke tests, coverage-only tests, tests that repeat the implementation. See [docs/tests-policy.md](docs/tests-policy.md).
 - Proof that uses only mocked LLM output.
-- Defensive code, extra validation, null checks or truncation for conditions that cannot occur.
+- Defensive code for impossible conditions or highly unlikely paths without
+  a reachable reproduction and an observed user or operational impact.
 - Placeholder code, TODOs, stubs and dead controls.
 - Claims with no evidence. Vague issues ("improve matching").
 - Duplicates of an open issue or PR. Search first.
@@ -79,6 +87,7 @@ You need [Bun](https://bun.sh) 1.4.2 (the version in `package.json`) and Postgre
 ```bash
 cp .env.example .env                                   # never commit .env
 bun install --frozen-lockfile
+bun run spec:setup                                     # Node 24+ for Vibespec
 bun run packages/observatory/db/dev-pg.ts up           # the dev Postgres on localhost:54339
 bun run sim                                            # must pass before you start
 ```
@@ -133,7 +142,7 @@ The validation layer is the simulations plus the integration and e2e tests ([doc
 
 | Command | What it does | Needs |
 |---|---|---|
-| `bun run sim` | Every simulation block on pinned seeds: the `evals/` corpora, onboarding, the Network, slop, relay, peon, friends, Clef, safety, ops, pipeline and audit. Exits 1 when a blocking gate fails. Offline. No LLM. | Dev Postgres for the safety, ops, pipeline and audit blocks (they skip without it) |
+| `bun run sim` | Every simulation block on pinned seeds: the `evals/` corpora, onboarding, the Network, slop, relay, peon, friends, Clef, safety, ops, pipeline, pipeline-slop and audit. Exits 1 when a blocking gate fails. Offline. No LLM. | Dev Postgres for the safety, ops, pipeline, pipeline-slop and audit blocks (they skip without it) |
 | `bun run sim --only <block>` | One block. You can repeat `--only`. Use it while you work. | |
 | `bun run sim --quick` | Fewer seeds and shorter runs. Quality gates become tracked. | |
 | `bun run sim --with-capital` | Adds the slow network-capital block. | |
@@ -144,7 +153,9 @@ The validation layer is the simulations plus the integration and e2e tests ([doc
 | `bun run plugins/build.ts --check` | The plugin snapshots match `sites/skills`. | |
 | `bun run sites:build` | The production build of the four sites. | |
 
-CI (`.github/workflows/ci.yml`) runs all of these with no secrets. CI never calls an LLM. So your PR must also show a real-LLM run (section 7.2).
+CI (`.github/workflows/ci.yml`) runs all of these with no secrets or model
+providers. For changes to model-backed behavior, show a real-LLM run
+(section 7.2).
 
 ## 7. Validate the matching algorithm
 
@@ -163,7 +174,9 @@ The ConsentNetwork (`packages/network`) calls the engine once a day. A person re
 
 ### 7.2 Runs with real LLM calls
 
-Real LLM calls are required for evidence. Mocked LLM output is not proof. Set `SURPLUS_API_KEY` (or `OPENAI_API_KEY`) in `.env` first. Each run costs money. Start small.
+For model-backed behavior, run the affected path with a real model. Set
+`SURPLUS_API_KEY` (or `OPENAI_API_KEY`) in `.env` first. Each run costs money.
+Start small.
 
 | What it measures | Command |
 |---|---|
@@ -182,7 +195,7 @@ In the PR, give the provider, the exact model ID, the request settings, the numb
 
 Use this method for every quality change:
 
-1. Pick one score from section 10. Record the baseline on `main` with a fixed command and fixed seeds.
+1. Pick one score from section 10. Record the baseline on the PR target branch with a fixed command and fixed seeds.
 2. Make one change.
 3. Run the same command with the same seeds. Record the result.
 4. Keep the change only if the score improves and every safety gate stays at its value. Canary leaks, invariant violations and minor contacts are always 0.
@@ -212,7 +225,8 @@ bun run packages/sim/src/apps/friends/cli.ts --seeds 5-8
 
 ## 8. Test in real agent clients
 
-Members reach The Network through their own AI agent. So you must test a changed flow in several agent clients. Record each one.
+Members reach The Network through their own AI agent. For a changed agent
+flow, test it in each affected agent client. Record each one.
 
 The integration points:
 
@@ -253,7 +267,7 @@ For each run, report: the client name and version, the provider, the exact model
 
 Caution: use only fictional 555-01xx phone numbers locally. Never give an agent a real phone number or a real login code.
 
-## 9. No UI changes
+## 9. Public interface changes
 
 Do not change the UI, the visual design, styles or copy. This includes the sites, the Observatory, the admin console, `SKILL.md` text and any message text that a member sees.
 
@@ -297,7 +311,7 @@ Bug | MVP gap | Measured problem
 ## Summary
 One or two sentences. Say what is incorrect. Say who it affects.
 
-## PRD reference
+## Product story or rule
 Section number(s). Example: PRD 32.9.
 
 ## Steps to see the problem
@@ -318,28 +332,35 @@ Command, seed, provider and model. A maintainer must be able to do it again.
 
 ### 12.1 Rules
 
-- Link a reproduced issue or an approved requirement (PRD or MVP-plan section).
+- Link a reproduced issue, approved product story or rule, or maintainer request.
 - Use the code that exists. Remove dead code and merge duplicates. Add a new type, file, package or dependency only when it is necessary, and say why.
 - Explain the cause. Describe at least two other implementations and why yours is better.
 - A bug fix adds one sim gate, scenario, corpus row, or integration or e2e case that fails before the fix. That is enough. Do not add more.
-- Write results to `docs/results/YYYY-MM-DD-<topic>.md` with the date, command, seed, provider, model, request settings and sample size.
+- For measured research or simulation changes, write results to
+  `docs/results/YYYY-MM-DD-<topic>.md` with the date, command, seed, provider,
+  model, request settings and sample size.
 
 ### 12.2 Evidence checklist
 
-Every PR must include each item. Write `N/A: <reason>` only when an item does not apply.
+Use the [evidence policy](#evidence) for the PR body. Include each applicable
+item below.
 
 - [ ] The repository is starred and the PR comes from your fork.
-- [ ] Linked issue or approved requirement (PRD or MVP-plan section).
+- [ ] Linked issue, approved product story or rule, or maintainer request.
 - [ ] The root cause, in plain words.
 - [ ] The fix, and two other implementations you did not use.
 - [ ] The before and after results, with the same command, seeds and data.
-- [ ] Real-LLM evidence: commands and output, provider and exact model ID, number of calls and cost.
-- [ ] Agent clients tested (section 8): client and version, provider, model, result.
-- [ ] Logs or video when a flow is involved.
-- [ ] `bun run sim`, `bun run typecheck`, `bun run test:integration` and `bun run test:e2e` pass. Paste the summary lines.
+- [ ] For model-backed changes, real-LLM commands and output, provider, exact
+  model ID, number of calls and cost.
+- [ ] For agent flow changes, client and version, provider, model and result
+  for each applicable client (section 8).
+- [ ] For application changes, report `bun run sim`, `bun run typecheck`,
+  `bun run test:integration` and `bun run test:e2e`. Set `REQUIRE_PG=1` for
+  the Postgres-dependent checks. Paste the summary lines.
+- [ ] For spec changes, confirm that the spec, generated modules, and related
+  flow model agree. Include Vibespec check results and any open obligations.
 - [ ] Test steps and the expected result of each step.
 - [ ] Risks and trade-offs.
-- [ ] No UI change, or the broken-flow exception with before and after video (section 9).
 - [ ] No secrets, `.env`, `runs/` or member data in the diff.
 
 ### 12.3 Template
@@ -349,10 +370,10 @@ Every PR must include each item. Write `N/A: <reason>` only when an item does no
 One or two sentences. What changes and why.
 
 ## Type
-Bug fix | Measured improvement | Security | MVP capability
+Bug fix | Measured improvement | Security | MVP capability | Documentation
 
 ## Linked issue or requirement
-#<issue>, PRD <section>
+Issue, approved specification and rule, or maintainer request.
 
 ## Problem and root cause
 
@@ -363,11 +384,15 @@ Bug fix | Measured improvement | Security | MVP capability
 2. Option B. Why not.
 
 ## Evidence
-| Metric | Before | After | Command and seeds |
-|---|---|---|---|
+- Change types: comma-separated types
+- Test results: commands and observed outcomes or linked results
+- Proof of change: reproduction and before/after results or demonstrated outcome
+- UI video: before and after recordings, for UI changes
+- Runtime logs: redacted service, simulator or agent output, for non-UI changes
+- Benchmarks: reproducible baseline and PR measurements, for performance changes
+- On-device testing: physical device, OS, build, steps and outcome, for hardware changes
 
-Real LLM: provider, model, calls, cost.
-Validation: sim, typecheck, integration and e2e summary lines.
+For model-backed changes, give the provider, model, calls and cost.
 
 ## Agent clients tested
 | Client and version | Provider | Model | Result |
@@ -379,6 +404,49 @@ Validation: sim, typecheck, integration and e2e summary lines.
 ## Risks and trade-offs
 ```
 
+## Evidence
+
+Include an `## Evidence` heading in every PR body. Put each field on its own
+line. A Markdown bullet before the field name is optional.
+
+- `Change types:` List every applicable type, separated by commas. Use
+  `docs` alone for documentation-only work. Use `non-ui` for non-visual
+  behavior, `ui` for a user interface, `performance` for a claimed
+  optimization, and `hardware` for device-dependent behavior.
+- `Test results:` Give the exact commands and observed results or link the CI
+  jobs and summarize their outcome. Report failures and skips. For docs-only
+  work, show the applicable Markdown, link, example, or consistency check.
+- `Proof of change:` Show how to reproduce the issue on the target branch
+  and what happened on the PR commit with the same input. For an approved
+  capability, show the user journey and the expected outcome. For docs-only
+  work, show the contradiction or gap and the corrected instruction.
+- `UI video:` For UI fixes, link recordings of the broken and fixed flow.
+  Show the steps in the affected site, connector screen, or staff console.
+  Use synthetic accounts. The broken-flow exception in section 9 applies.
+- `Runtime logs:` For non-UI changes, attach redacted before and after
+  output from the affected simulator, service, or agent client. For HTTP
+  and Postgres changes, exercise the relevant real integration or end-to-end
+  path. For delivery, use local dry-run provider output.
+- `Benchmarks:` For an optimization, name the metric, baseline and PR
+  commits, command, hardware, workload, sample count, and before and after
+  results. Use the same inputs and environment. For matching and simulation
+  changes, report fixed seeds, held-out results, and the blocking safety gates.
+- `On-device testing:` For a hardware-dependent change, report the model,
+  OS, build and exact steps on each affected physical target. For a mobile
+  handoff, use an approved test setup and show the flow on a real phone.
+  Keep phone numbers, login codes, and member data out of public evidence.
+
+Supply an inspectable artifact or substantive inline evidence for each required
+field. A placeholder or a bare claim that it passes is insufficient. Include
+the first three fields for every PR. Include the other fields whenever the
+matching change type applies. For Slop.cash submissions, generate the
+footer and record the opened PR using the published [contributor workflow](https://slop.cash/contribute/SKILL.md).
+
+Maintainers close PRs that fail to prove a useful change or add complexity to
+highly unlikely paths without evidence of reachability and material impact.
+Slop.cash deducts Points from eligible signed submissions when the published
+closure and Points policy applies. Closed submissions earn no reward.
+
 ## 13. Write in ASD-STE100 Simplified Technical English
 
 Write every issue and PR so that a person who is not technical can understand it.
@@ -387,7 +455,7 @@ Write every issue and PR so that a person who is not technical can understand it
 - Write one instruction in one sentence.
 - Use the active voice and the imperative for steps.
 - Use simple tenses.
-- Use one word for one meaning. Use the PRD terms.
+- Use one word for one meaning. Use the product specification terms.
 - Explain a technical word the first time you use it.
 - Put a warning before the step it applies to.
 - Use lists and tables for steps, options and numbers.
